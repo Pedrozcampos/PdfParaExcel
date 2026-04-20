@@ -1,66 +1,76 @@
-import fitz  # PyMuPDF
+import pdfplumber
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
-import os
 
-def extrair_seguro():
+
+def selecionar_arquivo():
     root = tk.Tk()
     root.withdraw()
-    arquivos = filedialog.askopenfilenames(title="Selecione os 12 PDFs", filetypes=[("PDF", "*.pdf")])
-    if not arquivos: return
 
-    pasta_destino = os.path.dirname(arquivos[0])
-    # Mudamos para .csv para garantir que o arquivo não corrompa
-    arquivo_saida = os.path.join(pasta_destino, "COMPILADO_ESTOQUE_FINAL.csv")
-    
+    # Abre a caixa para selecionar o arquivo
+    caminho_pdf = filedialog.askopenfilename(
+        title="Selecione o PDF de Estoque",
+        filetypes=[("Arquivos PDF", "*.pdf")]
+    )
+    return caminho_pdf
+
+def extrair_dados_pdf():
+    arquivo_entrada = selecionar_arquivo()
+
+    if not arquivo_entrada:
+        print("Nenhum arquivo selecionado. Encerrando.")
+        return
+
+    arquivo_saida = arquivo_entrada.replace(".pdf", "_CONVERTIDO.xlsx")
     start_time = datetime.now()
-    dados_acumulados = []
-
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Iniciando extração segura...")
+    dados_finais = []
 
     try:
-        for caminho in arquivos:
-            nome_arq = os.path.basename(caminho)
-            doc = fitz.open(caminho)
-            print(f">>> Processando: {nome_arq}")
+        with pdfplumber.open(arquivo_entrada) as pdf:
+            total_paginas = len(pdf.pages)
+            print(f"Processando {total_paginas} páginas...")
 
-            for i, pagina in enumerate(doc):
-                # Extração por palavras para manter a velocidade
-                palavras = pagina.get_text("words")
-                
-                linhas = {}
-                for p in palavras:
-                    y = round(p[1], 1)
-                    texto = p[4]
-                    if y not in linhas:
-                        linhas[y] = []
-                    linhas[y].append(texto)
-                
-                for y in sorted(linhas.keys()):
-                    # Criamos uma linha limpa: [Produto, Data, Valor..., Nome do Arquivo]
-                    linha_dados = [" ".join(linhas[y]), nome_arq]
-                    dados_acumulados.append(linha_dados)
+            for i, pagina in enumerate(pdf.pages):
+                # Extração
+                tabelas = pagina.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "snap_tolerance": 3,
+                    "join_tolerance": 3
+                })
 
-                if (i + 1) % 500 == 0:
-                    print(f"   Progresso: {i + 1}/{len(doc)} páginas...")
+                for tabela in tabelas:
+                    df_temp = pd.DataFrame(tabela)
+                    # Remove linhas e colunas vazias
+                    df_temp = df_temp.dropna(how='all').dropna(axis=1, how='all')
+                    if not df_temp.empty:
+                        # Remove linhas repitidas do cabeçalho
+                        dados_finais.append(df_temp)
+                # Progress no terminal
+                if (i + 1) % 50 == 0:
+                    print(f"Progresso: {i + 1}/{total_paginas} páginas concluídas.")
+        # Consolida tudo
 
-        if dados_acumulados:
-            print("\nSalvando arquivo CSV (Formato compatível com Excel)...")
-            df_final = pd.DataFrame(dados_acumulados)
-            
-            # Salvando como CSV com separador ';' que o Excel do Brasil adora
-            df_final.to_csv(arquivo_saida, index=False, sep=';', encoding='latin1', errors='replace')
-            
+        if dados_finais:
+            df_consolidado = pd.concat(dados_finais, ignore_index=True)
+
+            # Exportação rápida xlsxwriter
+            with pd.ExcelWriter(arquivo_saida, engine='xlsxwriter') as writer:
+
+                df_consolidado.to_excel(writer, index=False, sheet_name='Estoque')
+
             tempo_total = datetime.now() - start_time
-            print(f"--- FINALIZADO EM {tempo_total} ---")
-            messagebox.showinfo("Sucesso", f"Arquivo salvo com sucesso!\nLocal: {arquivo_saida}")
+            print(f"\nSucesso! Arquivo salvo em: {arquivo_saida}")
+            print(f"Tempo total de execução: {tempo_total}")
+            messagebox.showinfo("Concluído", f"Processamento finalizado em {tempo_total}")
         else:
-            print("Nenhum dado encontrado.")
-
+            print("Nenhuma tabela encontrada no PDF.")
     except Exception as e:
         messagebox.showerror("Erro", f"Ocorreu um erro: {e}")
 
+
 if __name__ == "__main__":
-    extrair_seguro()
+    extrair_dados_pdf()
+
