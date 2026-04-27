@@ -1,76 +1,84 @@
-import pdfplumber
+import fitz  # PyMuPDF
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
 
-
-def selecionar_arquivo():
+def extrair_dados_pdf():
     root = tk.Tk()
     root.withdraw()
+    caminho_pdf = filedialog.askopenfilename(title="Selecione o PDF", filetypes=[("PDF", "*.pdf")])
+    if not caminho_pdf: return
 
-    # Abre a caixa para selecionar o arquivo
-    caminho_pdf = filedialog.askopenfilename(
-        title="Selecione o PDF de Estoque",
-        filetypes=[("Arquivos PDF", "*.pdf")]
-    )
-    return caminho_pdf
-
-def extrair_dados_pdf():
-    arquivo_entrada = selecionar_arquivo()
-
-    if not arquivo_entrada:
-        print("Nenhum arquivo selecionado. Encerrando.")
-        return
-
-    arquivo_saida = arquivo_entrada.replace(".pdf", "_CONVERTIDO.xlsx")
     start_time = datetime.now()
+    arquivo_saida = caminho_pdf.replace(".pdf", "_TABELA_FINAL.xlsx")
+    
+    # Mapeamento aproximado das colunas baseado no layout do Modelo-03
+    # Essas coordenadas (x0) cobrem os campos: Esp, Número, Dia, Mês, Ano, Cod, Quant, Vl Unit, etc.
+    limites_colunas = [0, 35, 90, 115, 135, 155, 200, 250, 310, 360, 420, 480, 540, 600, 660, 720, 800]
+
     dados_finais = []
 
     try:
-        with pdfplumber.open(arquivo_entrada) as pdf:
-            total_paginas = len(pdf.pages)
-            print(f"Processando {total_paginas} páginas...")
+        doc = fitz.open(caminho_pdf)
+        print(f"Processando {len(doc)} páginas...")
 
-            for i, pagina in enumerate(pdf.pages):
-                # Extração
-                tabelas = pagina.extract_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "lines",
-                    "snap_tolerance": 3,
-                    "join_tolerance": 3
-                })
+        for pagina in doc:
+            palavras = pagina.get_text("words") # Retorna (x0, y0, x1, y1, "texto", ...)
+            
+            # Agrupar palavras por linha (y0)
+            linhas_dict = {}
+            for p in palavras:
+                y_coord = round(p[1], 1) # y0 é a altura
+                if y_coord not in linhas_dict:
+                    linhas_dict[y_coord] = []
+                linhas_dict[y_coord].append(p)
 
-                for tabela in tabelas:
-                    df_temp = pd.DataFrame(tabela)
-                    # Remove linhas e colunas vazias
-                    df_temp = df_temp.dropna(how='all').dropna(axis=1, how='all')
-                    if not df_temp.empty:
-                        # Remove linhas repitidas do cabeçalho
-                        dados_finais.append(df_temp)
-                # Progress no terminal
-                if (i + 1) % 50 == 0:
-                    print(f"Progresso: {i + 1}/{total_paginas} páginas concluídas.")
-        # Consolida tudo
+            for y in sorted(linhas_dict.keys()):
+                linha_palavras = linhas_dict[y]
+                # Criar uma linha vazia com o número de colunas definido
+                linha_formatada = [""] * len(limites_colunas)
+                
+                eh_linha_util = False
+                for p in linha_palavras:
+                    x0, texto = p[0], p[4]
+                    
+                    # Filtro para ignorar cabeçalhos
+                    if any(c in texto for c in ["Página", "Série", "Registro", "Controle"]):
+                        continue
+
+                    # Identifica em qual coluna o texto se encaixa baseado no X0
+                    for i in range(len(limites_colunas)):
+                        limite_atual = limites_colunas[i]
+                        proximo_limite = limites_colunas[i+1] if i+1 < len(limites_colunas) else 1000
+                        
+                        if limite_atual <= x0 < proximo_limite:
+                            # Se já houver texto na célula (ex: números grandes), concatena
+                            linha_formatada[i] = f"{linha_formatada[i]} {texto}".strip()
+                            if texto.replace('.','').replace(',','').isdigit() or texto == "NF":
+                                eh_linha_util = True
+                            break
+                
+                if eh_linha_util:
+                    dados_finais.append(linha_formatada)
 
         if dados_finais:
-            df_consolidado = pd.concat(dados_finais, ignore_index=True)
-
-            # Exportação rápida xlsxwriter
+            df = pd.DataFrame(dados_finais)
+            # Remove colunas que ficaram totalmente vazias
+            df = df.dropna(how='all', axis=1)
+            
             with pd.ExcelWriter(arquivo_saida, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, header=False)
 
-                df_consolidado.to_excel(writer, index=False, sheet_name='Estoque')
-
-            tempo_total = datetime.now() - start_time
-            print(f"\nSucesso! Arquivo salvo em: {arquivo_saida}")
-            print(f"Tempo total de execução: {tempo_total}")
-            messagebox.showinfo("Concluído", f"Processamento finalizado em {tempo_total}")
+            print(f"Sucesso! Tempo: {datetime.now() - start_time}")
+            messagebox.showinfo("Sucesso", f"Processado com colunas alinhadas!")
         else:
-            print("Nenhuma tabela encontrada no PDF.")
-    except Exception as e:
-        messagebox.showerror("Erro", f"Ocorreu um erro: {e}")
+            messagebox.showwarning("Aviso", "Nenhum dado encontrado.")
 
+    except Exception as e:
+        messagebox.showerror("Erro", str(e))
+    finally:
+        if 'doc' in locals(): doc.close()
 
 if __name__ == "__main__":
     extrair_dados_pdf()
-
