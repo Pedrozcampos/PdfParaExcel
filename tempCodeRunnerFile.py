@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ─── REGEXES ──────────────────────────────────────────────────────────────────
+# ─── Regex Ajustado ────────────────────────────────────────────────────────────
 RE_PRODUCT = re.compile(
     r"Produto:\s+(\S+)\s+(.+?)\s+Unidade:\s*(\S+)\s+Embalagem:\s*(\S+)\s*$"
 )
@@ -16,9 +16,13 @@ RE_SALDO = re.compile(
     r"Saldo\s+Anterior:\s*([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)"
 )
 
-# Regex simplificado que foca na DATA como âncora central
+# Alterado: Uso de (\S*) para permitir colunas iniciais vazias e \s* para flexibilidade
 RE_TRANSACTION = re.compile(
-    r"^(.*?)\s*(\d{1,2})\s+(\d{1,2})\s+(\d{2,4})\s+(.*)$"
+    r"^(\S*)\s*(\S*)\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)"
+    r"\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)"
+    r"\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)"
+    r"\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)"
+    r"(?:\s+(.*))?$"
 )
 
 RE_TOTAL = re.compile(
@@ -37,13 +41,11 @@ SKIP_STARTS = (
 def br_float(s):
     if not s or s.strip() == "": return 0.0
     try:
-        # Remove pontos de milhar e troca vírgula por ponto decimal
-        clean_s = str(s).replace(".", "").replace(",", ".")
-        return float(clean_s)
+        return float(str(s).replace(".", "").replace(",", "."))
     except Exception:
         return s
 
-# ─── ESTILOS ──────────────────────────────────────────────────────────────────
+# ─── Estilos (Mantidos como constantes para performance) ──────────────────────
 HEADER_FILL  = PatternFill("solid", fgColor="4472C4")
 HEADER_FONT  = Font(bold=True, color="FFFFFF", size=8, name="Arial")
 PRODUCT_FILL = PatternFill("solid", fgColor="D9E1F2")
@@ -64,7 +66,19 @@ COLS = [
     ("Observação", 22),
 ]
 
-# ─── EXCEL WRITER ──────────────────────────────────────────────────────────────
+SEC_HEADERS = [
+    (1, 3, "Documento"), (4, 8, "Lançamento"),
+    (9, 12, "Entradas"), (13, 16, "Saídas"),
+    (17, 19, "Estoque"), (20, 20, ""),
+]
+
+def apply_style(cell, font=None, fill=None, align=None):
+    cell.border = BORDER
+    if font: cell.font = font
+    if fill: cell.fill = fill
+    if align: cell.alignment = align
+
+# ─── Excel writer ──────────────────────────────────────────────────────────────
 class ExcelWriter:
     def __init__(self, path):
         self.wb = Workbook()
@@ -75,55 +89,53 @@ class ExcelWriter:
         for col, (_, w) in enumerate(COLS, 1):
             self.ws.column_dimensions[get_column_letter(col)].width = w
 
-    def _apply_style(self, cell, font=None, fill=None, align=None):
-        cell.border = BORDER
-        if font: cell.font = font
-        if fill: cell.fill = fill
-        if align: cell.alignment = align
-
     def write_product_header(self, prod):
         ws, r = self.ws, self.row
         label = (f"Produto: {prod['code']}  {prod['name']}   "
                  f"Unidade: {prod['unit']}   Embalagem: {prod['embalagem']}   "
                  f"Saldo Anterior: {prod['saldo_q']:,.3f}   "
                  f"{prod['saldo_vu']:,.6f}   {prod['saldo_vt']:,.2f}")
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(COLS))
-        self._apply_style(ws.cell(r, 1, label), font=PRODUCT_FONT, fill=PRODUCT_FILL, align=Alignment(horizontal="left"))
-        self.row += 1
         
-        r2 = self.row
-        groups = [(1,3,"Documento"),(4,6,"Data"),(7,8,"Lançamento"),(9,12,"Entradas"),(13,16,"Saídas"),(17,19,"Estoque"),(20,20,"")]
-        for s, e, title in groups:
-            if s != e: ws.merge_cells(start_row=r2, start_column=s, end_row=r2, end_column=e)
-            self._apply_style(ws.cell(r2, s, title), font=HEADER_FONT, fill=HEADER_FILL, align=Alignment(horizontal="center"))
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(COLS))
+        apply_style(ws.cell(r, 1, label), font=PRODUCT_FONT, fill=PRODUCT_FILL, align=Alignment(horizontal="left"))
         self.row += 1
 
+        # Cabeçalhos de Seção
+        r2 = self.row
+        for s, e, title in SEC_HEADERS:
+            if s != e:
+                ws.merge_cells(start_row=r2, start_column=s, end_row=r2, end_column=e)
+            apply_style(ws.cell(r2, s, title), font=HEADER_FONT, fill=HEADER_FILL, align=Alignment(horizontal="center"))
+        self.row += 1
+
+        # Cabeçalhos de Coluna
         r3 = self.row
         for col, (name, _) in enumerate(COLS, 1):
-            self._apply_style(ws.cell(r3, col, name), font=HEADER_FONT, fill=HEADER_FILL, align=Alignment(horizontal="center", vertical="center", wrap_text=True))
+            apply_style(ws.cell(r3, col, name), font=HEADER_FONT, fill=HEADER_FILL, align=Alignment(horizontal="center", vertical="center", wrap_text=True))
         ws.row_dimensions[r3].height = 28
         self.row += 1
 
     def write_transaction(self, fields):
         for col, val in enumerate(fields, 1):
-            aln = Alignment(horizontal="right") if isinstance(val, (float, int)) and col >= 9 else Alignment(horizontal="center")
-            self._apply_style(self.ws.cell(self.row, col, val), font=DATA_FONT, align=aln)
+            # Alinhamento dinâmico: Números à direita, texto à esquerda
+            aln_h = "right" if isinstance(val, (float, int)) else "center" if col <= 6 else "left"
+            apply_style(self.ws.cell(self.row, col, val), font=DATA_FONT, align=Alignment(horizontal=aln_h))
         self.row += 1
 
     def write_total(self, tf):
         r = self.row
         self.ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
-        self._apply_style(self.ws.cell(r, 1, f"Número Total de Notas: {tf[0]}"), font=TOTAL_FONT, fill=TOTAL_FILL)
+        apply_style(self.ws.cell(r, 1, f"Número Total de Notas: {tf[0]}"), font=TOTAL_FONT, fill=TOTAL_FILL)
         
         mapping = {9: tf[1], 11: tf[2], 12: tf[3], 13: tf[4], 15: tf[5], 16: tf[6], 17: tf[7], 19: tf[8]}
         for col, val in mapping.items():
-            self._apply_style(self.ws.cell(r, col, val), font=TOTAL_FONT, fill=TOTAL_FILL, align=Alignment(horizontal="right"))
+            apply_style(self.ws.cell(r, col, val), font=TOTAL_FONT, fill=TOTAL_FILL, align=Alignment(horizontal="right"))
         self.row += 1
 
     def save(self):
         self.wb.save(self.path)
 
-# ─── PDF PARSER ────────────────────────────────────────────────────────────────
+# ─── PDF parser ────────────────────────────────────────────────────────────────
 def parse_pdf(pdf_path, xlsx_path, progress_cb=None):
     writer = ExcelWriter(xlsx_path)
     pending_product = None
@@ -134,79 +146,56 @@ def parse_pdf(pdf_path, xlsx_path, progress_cb=None):
         for page_num, page in enumerate(pdf.pages, 1):
             if progress_cb: progress_cb(page_num, total_pages)
 
-            # x_tolerance=5 resolve o problema de números da data se separarem
-            text = page.extract_text(x_tolerance=5, y_tolerance=3) or ""
-            
-            for raw_line in text.splitlines():
-                line = raw_line.strip()
-                if not line: continue
+            # Aumentar um pouco a tolerância ajuda a manter colunas vazias como espaços
+            text = page.extract_text(x_tolerance=3, y_tolerance=3)
+            if not text: continue
 
-                m_prod = RE_PRODUCT.match(line)
+            for line in text.splitlines():
+                clean_line = line.strip()
+                if not clean_line: continue
+
+                # Identificação do Produto
+                m_prod = RE_PRODUCT.match(clean_line)
                 if m_prod:
-                    pending_product = {"code": m_prod.group(1), "name": m_prod.group(2).strip(), 
-                                       "unit": m_prod.group(3), "embalagem": m_prod.group(4), 
-                                       "saldo_q":0, "saldo_vu":0, "saldo_vt":0}
+                    pending_product = {
+                        "code": m_prod.group(1), "name": m_prod.group(2).strip(),
+                        "unit": m_prod.group(3), "embalagem": m_prod.group(4),
+                        "saldo_q": 0, "saldo_vu": 0, "saldo_vt": 0
+                    }
                     in_tx = False
                     continue
 
-                m_saldo = RE_SALDO.match(line)
+                # Saldo Anterior
+                m_saldo = RE_SALDO.match(clean_line)
                 if m_saldo and pending_product:
-                    pending_product.update({"saldo_q": br_float(m_saldo.group(1)), 
-                                            "saldo_vu": br_float(m_saldo.group(2)), 
-                                            "saldo_vt": br_float(m_saldo.group(3))})
+                    pending_product["saldo_q"]  = br_float(m_saldo.group(1))
+                    pending_product["saldo_vu"] = br_float(m_saldo.group(2))
+                    pending_product["saldo_vt"] = br_float(m_saldo.group(3))
                     writer.write_product_header(pending_product)
                     pending_product = None
                     in_tx = True
                     continue
 
-                if any(line.startswith(k) for k in SKIP_STARTS) or not in_tx:
+                if any(clean_line.startswith(k) for k in SKIP_STARTS):
                     continue
 
-                m_total = RE_TOTAL.match(line)
+                if not in_tx: continue
+
+                # Linha de Totalização do Produto
+                m_total = RE_TOTAL.match(clean_line)
                 if m_total:
                     writer.write_total([m_total.group(1)] + [br_float(m_total.group(i)) for i in range(2, 10)])
                     in_tx = False
                     continue
 
-                # ─── LÓGICA DE CAPTURA DE LANÇAMENTOS ───
-                m_tx = RE_TRANSACTION.match(line)
+                # Transação (AQUI ESTAVA O PROBLEMA)
+                # Usamos search em vez de match para ser mais tolerante com espaços no início
+                m_tx = RE_TRANSACTION.search(line) 
                 if m_tx:
-                    # Divisão da linha baseada na posição da data
-                    antes = m_tx.group(1).strip().split() 
-                    dia, mes, ano = m_tx.group(2), m_tx.group(3), m_tx.group(4)
-                    depois = m_tx.group(5).strip().split()
-
-                    # 1. Colunas de Documento (Esp, Série, Número)
-                    doc_cols = [""] * 3
-                    for i, v in enumerate(reversed(antes)):
-                        if i < 3: doc_cols[2-i] = v
-
-                    # 2. Data
-                    date_cols = [dia, mes, ano]
-
-                    # 3. Separar Observação (se existir texto no final) e Valores
-                    obs_val = ""
-                    # Se o último item contém letras, assumimos que é observação
-                    if depois and any(c.isalpha() for c in depois[-1]):
-                        obs_val = depois.pop()
-
-                    # Pegamos os últimos 11 blocos de texto como os valores numéricos das colunas
-                    val_strings = depois[-11:] if len(depois) >= 11 else depois
-                    num_vals = [br_float(v) for v in val_strings]
-                    
-                    # Preenche com 0.0 se a linha estiver incompleta
-                    while len(num_vals) < 11:
-                        num_vals.insert(0, 0.0)
-
-                    # 4. Colunas de Código (Contábil / Fiscal) - O que sobrou entre a data e os valores
-                    sobra_codigos = depois[:-11] if len(depois) > 11 else []
-                    code_cols = [""] * 2
-                    for i, v in enumerate(sobra_codigos):
-                        if i < 2: code_cols[i] = v
-
-                    # Montagem final da linha (Total 20 colunas)
-                    final_fields = doc_cols + date_cols + code_cols + num_vals + [obs_val]
-                    writer.write_transaction(final_fields)
+                    g = m_tx.groups()
+                    # Converte colunas financeiras (índice 8 em diante) para float
+                    fields = [br_float(v) if i >= 8 and i <= 18 else v for i, v in enumerate(g)]
+                    writer.write_transaction(fields)
 
     writer.save()
 
@@ -239,8 +228,8 @@ class App(tk.Tk):
         tk.Entry(f1, textvariable=self.pdf_var, width=52, font=("Arial", 9),
                  state="readonly", readonlybackground="white").pack(side="left", padx=(10,4), pady=8)
         tk.Button(f1, text="Selecionar…", command=self._pick_pdf,
-                 bg="#2A55A0", fg="white", font=("Arial", 9, "bold"),
-                 relief="flat", padx=10, cursor="hand2").pack(side="left", pady=8)
+                  bg="#2A55A0", fg="white", font=("Arial", 9, "bold"),
+                  relief="flat", padx=10, cursor="hand2").pack(side="left", pady=8)
 
         f2 = tk.LabelFrame(self, text=" Salvar Excel como ", bg="#F0F4FA",
                            font=("Arial", 9, "bold"), fg="#2A55A0", bd=1, relief="groove")
@@ -249,8 +238,8 @@ class App(tk.Tk):
         tk.Entry(f2, textvariable=self.xlsx_var, width=52, font=("Arial", 9),
                  state="readonly", readonlybackground="white").pack(side="left", padx=(10,4), pady=8)
         tk.Button(f2, text="Alterar…", command=self._pick_xlsx,
-                 bg="#5B7FBF", fg="white", font=("Arial", 9, "bold"),
-                 relief="flat", padx=10, cursor="hand2").pack(side="left", pady=8)
+                  bg="#5B7FBF", fg="white", font=("Arial", 9, "bold"),
+                  relief="flat", padx=10, cursor="hand2").pack(side="left", pady=8)
 
         f3 = tk.Frame(self, bg="#F0F4FA")
         f3.pack(fill="x", padx=18, pady=(6, 0))
@@ -270,7 +259,8 @@ class App(tk.Tk):
             title="Selecionar PDF",
             filetypes=[("Arquivos PDF", "*.pdf"), ("Todos os arquivos", "*.*")]
         )
-        if not path: return
+        if not path:
+            return
         self.pdf_var.set(path)
         self.xlsx_var.set(path.rsplit(".", 1)[0] + ".xlsx")
         self.btn.config(state="normal")
@@ -282,11 +272,15 @@ class App(tk.Tk):
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx"), ("Todos os arquivos", "*.*")]
         )
-        if path: self.xlsx_var.set(path)
+        if path:
+            self.xlsx_var.set(path)
 
     def _start(self):
-        pdf_in, xlsx_out = self.pdf_var.get(), self.xlsx_var.get()
-        if not pdf_in or not xlsx_out: return
+        pdf_in   = self.pdf_var.get()
+        xlsx_out = self.xlsx_var.get()
+        if not pdf_in or not xlsx_out:
+            messagebox.showwarning("Atenção", "Selecione o PDF e o destino do Excel.")
+            return
         self.btn.config(state="disabled")
         self.progress["value"] = 0
         self.status_var.set("Convertendo… aguarde.")
@@ -307,6 +301,7 @@ class App(tk.Tk):
         self.status_var.set(f"Processando página {current} de {total}…")
 
     def _done(self, xlsx_out, error):
+        self.progress["value"] = 100 if not error else 0
         self.btn.config(state="normal")
         if error:
             self.status_var.set(f"Erro: {error}")
@@ -315,5 +310,6 @@ class App(tk.Tk):
             self.status_var.set(f"✅  Concluído: {xlsx_out}")
             messagebox.showinfo("Concluído!", f"Excel salvo em:\n{xlsx_out}")
 
+# ─── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     App().mainloop()
